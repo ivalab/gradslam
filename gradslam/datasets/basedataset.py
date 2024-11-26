@@ -24,6 +24,39 @@ from natsort import natsorted
 from ..geometry.geometryutils import relative_transformation
 from . import datautils
 
+try:
+    # move the import here so the package doesn't require OpenEXR
+    # Apparently the install can be hard.
+    # Original source: https://github.com/cvg/nice-slam/blob/645b53af3dc95b4b348de70e759943f7228a61ca/src/utils/datasets.py
+    import OpenEXR as exr
+    import Imath
+
+    def read_EXR_depth(filename: str) -> np.ndarray:
+        """
+        Read depth data from EXR image file.
+
+        Args:
+            filename (str): File path.
+
+        Returns:
+            Y (numpy.array): Depth buffer in float32 format.
+        """
+
+        exrfile = exr.InputFile(filename)
+        header = exrfile.header()
+        dw = header["dataWindow"]
+        isize = (dw.max.y - dw.min.y + 1, dw.max.x - dw.min.x + 1)
+
+        if 'Y' not in header['channels']:
+            return None
+        C = exrfile.channel('Y', Imath.PixelType(Imath.PixelType.FLOAT))
+        return np.fromstring(C, dtype=np.float32).reshape(isize)
+
+except ImportError:
+    def read_EXR_depth(filename: str) -> np.ndarray:
+        raise NotImplementedError("OpenEXR not installed. Reading EXR images not available")
+    pass
+
 
 def as_intrinsics_matrix(intrinsics: List[float]) -> np.ndarray:
     """Take in a list of intrinsics and convert to a 3 x 3 intrinsics matrix.
@@ -40,7 +73,6 @@ def as_intrinsics_matrix(intrinsics: List[float]) -> np.ndarray:
     K[0, 2] = intrinsics[2]
     K[1, 2] = intrinsics[3]
     return K
-
 
 class GradSLAMDataset(torch.utils.data.Dataset):
     def __init__(
@@ -112,11 +144,11 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         self.color_paths, self.depth_paths, self.embedding_paths = self.get_filepaths()
         if len(self.color_paths) != len(self.depth_paths):
             raise ValueError("Number of color and depth images must be the same.")
-            if self.load_embeddings:
-                if len(self.color_paths) != len(self.embedding_paths):
-                    raise ValueError(
-                        "Mismatch between number of color images and number of embedding files."
-                    )
+        if self.load_embeddings:
+            if len(self.color_paths) != len(self.embedding_paths):
+                raise ValueError(
+                    "Mismatch between number of color images and number of embedding files."
+                )
         self.num_imgs = len(self.color_paths)
         self.poses = self.load_poses()
 
@@ -143,6 +175,12 @@ class GradSLAMDataset(torch.utils.data.Dataset):
 
     def load_poses(self):
         """Load camera poses. Implement in subclass."""
+        raise NotImplementedError
+
+    def read_embedding_from_file(self, embedding_path: str):
+        """Read embedding from file and process it. To be implemented in subclass for each dataset separately.
+        Can remain not implemented if your dataset does not support embeddings.
+        """
         raise NotImplementedError
 
     def _preprocess_color(self, color: np.ndarray):
@@ -223,6 +261,12 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         if ".png" in depth_path:
             # depth_data = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
             depth = np.asarray(imageio.imread(depth_path), dtype=np.int64)
+        elif ".exr" in depth_path:
+            depth = read_EXR_depth(depth_path)
+        elif ".npy" in depth_path:
+            depth = np.load(depth_path)
+        else:
+            raise NotImplementedError(f'File extension not supported for file {depth_path}')
 
         K = as_intrinsics_matrix([self.fx, self.fy, self.cx, self.cy])
         K = torch.from_numpy(K)
